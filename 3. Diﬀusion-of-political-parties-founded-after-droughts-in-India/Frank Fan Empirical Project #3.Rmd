@@ -1,0 +1,325 @@
+---
+title: "Empirical Assignment 3 - Frank Fan"
+output: html_notebook
+---
+
+```{r, message=F, warning=F}
+rm(list = ls(all = TRUE))
+setwd("C:/Users/Frank/Desktop/Social Network Analytics/Assignment 3")
+
+library(data.table)
+library(igraph)
+library(reshape)
+library(MASS)
+library(plm)
+library(pglm)
+library(ggplot2)
+library(varhandle)
+library(panelAR)
+
+```
+## Data Preparation
+```{r}
+# Load data into R
+district = read.csv("district_information.csv", header = TRUE)
+border = read.csv("border_information.csv", header = TRUE)
+rain = read.csv("rain_information.csv", header = TRUE)
+
+# Check which year there is an election
+years = sort(unique(district$year))
+dis = unique(district$district)
+
+# Generate time intervals, on which I then aggregated the rain data
+time_interval = c(list(1946:1951),lapply(seq_along(years[-1]),function(i) seq(years[i]+1,years[i+1])))
+print(time_interval) 
+# There are 14 time intervals in total
+```
+
+```{r}
+# I added measures of rainfall for the sake of 1 (C). Here moderate_extreme_weather represents how many days that the Standardized Precipitation Index falls below -1 or above 1. 
+rain <- data.table(rain)
+rain[, moderate_drought := as.numeric(spi < -1)]
+rain[, moderate_flood := as.numeric(spi > 1)]
+rain[, moderate_extreme_weather := as.numeric(spi > 1 | spi < -1)]
+rain <- data.frame(rain)
+```
+
+```{r}
+# Then I created a dataframe with just district rain data aggregated by each elections time interval
+rain_agg = district[,2:3]
+rain_agg$rain = NA
+rain_agg$spi = NA
+rain_agg$moderate_drought = NA
+rain_agg$moderate_flood = NA
+rain_agg$moderate_extreme_weather = NA
+rain_agg[,1] <- factor(rain_agg[,1], levels=levels(rain[,1]))
+
+# In the for-loop, I calculated the sum of the raw rainfall during the interval starting from the year following the previous election up until the year of the current election and the yearly average of the Standardized Precipitation Index during the interval starting from the year following the previous election up until the year of the current election. 
+for(i in 1:nrow(rain_agg)){
+  location <- rain_agg[i,1]
+  for(j in 1:14){
+    if(rain_agg[i,2] %in% time_interval[[j]]){
+      if(length(rain[rain$district== location &rain$year%in% time_interval[[j]],3])!=0){
+        rain_agg[i,3] <- sum(rain[rain$district==location&rain$year%in% time_interval[[j]],3])
+      }
+      if(length(rain[rain$district== location &rain$year%in% time_interval[[j]],4])!=0){
+        rain_agg[i,4] <- mean(rain[rain$district==location&rain$year%in% time_interval[[j]],4])
+      }
+      if(length(rain[rain$district== location &rain$year%in% time_interval[[j]],5])!=0){
+        rain_agg[i,5] <- sum(rain[rain$district==location&rain$year%in% time_interval[[j]],5])
+      }
+      if(length(rain[rain$district== location &rain$year%in% time_interval[[j]],6])!=0){
+        rain_agg[i,6] <- sum(rain[rain$district==location&rain$year%in% time_interval[[j]],6])
+      }
+      if(length(rain[rain$district== location &rain$year%in% time_interval[[j]],6])!=0){
+        rain_agg[i,7] <- sum(rain[rain$district==location&rain$year%in% time_interval[[j]],7])
+      }
+    }
+  }
+}
+
+# Let's take a quick look at the latest dataframe.
+print(rain_agg[1:5,])
+```
+
+```{r}
+# At the last step of data preparation, I merged rain data with election data. Let's take a quick look.
+district_rain <- merge(district, rain_agg, by=c('district','year'))
+print(district_rain[1:5,])
+```
+
+### Question 1
+1. First, we will set up the relationship between rainfall and political party foundings, and then modify the rainfall measure to generate a statistically independent measure for droughts. This modiﬁcation will allow us to isolate the eﬀect of economic strain on political parties from other underlying features of a region that might inﬂuence its political structure. 
+
+(A) Create a ﬁgure, for example, a scatter plot, showing the visual relationship between the level of rainfall in a district in the period leading up to the current election, and the number of political parties that are founded in a region.
+
+```{r}
+#In this chuck of code, I made visulizations of the relationshio between the level of rainfall in a district in the period leading up to the current election, and the number of political parties that are founded in a region. 
+lowess_rain = ggplot(district_rain, aes(rain, new_parties)) + geom_smooth(method = "loess", se = F) + labs(x = "Rainfall, in ml", y = "New parties") + coord_cartesian(ylim = c(1.75, 2.75)) + scale_y_continuous(breaks=seq(1.75,2.75,.25))
+
+lowess_spi = ggplot(district_rain, aes(spi, new_parties)) + geom_smooth(method = "loess", se = F) + labs(x = "Standardized Precipitation Index", y = "New parties") + coord_cartesian(ylim = c(1.75, 2.75), xlim = c(-1.5, 1.5))
+lowess_rain
+lowess_spi
+```
+**Insight:\
+From the visualizations, it is not difficult to see that there is indeed a relationship between the level of rainfall in a district in the period leading up to the current election, and the number of political parties that are founded in the region. 
+An overall trend can be observed: The more extreme(droughts or floods) the weather condition was in the district, the more new political parties were founded in that district. Apart from the overall trend, it is not hard to notice that droughts have a stronger effect on new political parties than floods. In both graphs of raw rainfall and SPI, most new political parties are founded when there are droughts happening.**
+\
+\
+\
+(B) Using the election-period level rainfall measures created above, show that the raw level of rainfall, as well as the Standardized Precipitation Index, are not independent from one election period to the next within a district, as well as from neighboring districts from one election period to the next. It is possible to show this relationship by regressing a district’s current level of the rainfall variable on (1) its lagged value and (2) the lagged value of its neighbors’ rainfall variable. For computing the neighbors’ value, you can use an average of each of the surrounding districts’ values. 
+
+```{r}
+# By using the rbind function, I made the border edge list undirected
+border1<- border[,c('district','focal_district')]
+colnames(border1) <- c('focal_district','district')
+border <- rbind(border, border1)
+```
+
+```{r}
+# I created a neighbor list that contains each district's neighbours.
+neighbor_list = lapply(seq_len(length(unique(district_rain$district))), function(j) unfactor(border$district[ unfactor(border$focal_district) == unfactor(unique(district_rain$district)[j])]))
+# Let's check the neighbours of the first district "Abilabad".
+print(neighbor_list[1])
+```
+
+```{r}
+# In the for-loop, I calculated during the interval starting from the year following the previous election up until the year of the current election, the sum of the neighbours' raw rainfall, the mean of the neighbours' spi and the sum of the neighbours' days of extreme weather condition for each district.
+district_rain <- data.frame(district_rain)
+for(i in 1:nrow(district_rain)){
+  position <- (as.character(unlist(unique(district_rain$district))) == as.character(unlist(district_rain[i,1])))
+  district_rain[i,'neighbor_rain'] <- mean(district_rain[district_rain$year==district_rain[i,2]&district_rain$district%in%unlist(neighbor_list[position]),24],na.rm=TRUE)
+  district_rain[i,'neighbor_spi'] <- mean(district_rain[district_rain$year==district_rain[i,2]&district_rain$district%in%unlist(neighbor_list[position]),25],na.rm=TRUE)
+  district_rain[i,'neighbor_moderate_drought'] <- mean(district_rain[district_rain$year==district_rain[i,2]&district_rain$district%in%unlist(neighbor_list[position]),26],na.rm=TRUE)
+  district_rain[i,'neighbor_moderate_flood'] <- mean(district_rain[district_rain$year==district_rain[i,2]&district_rain$district%in%unlist(neighbor_list[position]),27],na.rm=TRUE)
+  district_rain[i,'neighbor_moderate_extreme_weather'] <- mean(district_rain[district_rain$year==district_rain[i,2]&district_rain$district%in%unlist(neighbor_list[position]),28],na.rm=TRUE)
+}
+
+# Let's take a quick look at the new variables.
+print(district_rain[1:5,29:33])
+```
+
+```{r}
+# I then created lag variables for all weather-related columns using shift function. Later they were used in the regressions.
+district_rain = as.data.table(district_rain)
+colnames = c("rain", "spi", "new_parties", "neighbor_rain", "moderate_drought", "moderate_flood", "moderate_extreme_weather", "neighbor_spi", "neighbor_moderate_drought", "neighbor_moderate_flood", "neighbor_moderate_extreme_weather")
+lags = paste("lag_",colnames,sep="")
+district_rain[, (lags) := lapply(.SD, function(x) shift(x, 1)), .SDcols = colnames, by = district]
+
+# Let's take a quick look at them.
+print(district_rain[1:5,34:44])
+```
+
+```{r}
+# I also needed a control variable for the number of years in the election period. Let's call it 'time_interval'.
+for(i in 2:nrow(district_rain)){
+  if(district_rain[i,1]==district_rain[i-1,1]){
+    district_rain[i,'time_interval'] = district_rain[i,2]-district_rain[i-1,2]
+  }
+}
+district_rain[year == 1951, time_interval := 5]
+district_rain[year == 1957, time_interval := 6]
+district_rain[year == 1962, time_interval := 5]
+district_rain[year == 1967, time_interval := 5]
+district_rain[year == 1977, time_interval := 6]
+```
+
+```{r}
+# Now finally, let's run regression. Check whether a district’s current level of the rainfall is related to (1) its lagged value and (2) the lagged value of its neighbors’ rainfall variable. 
+summary(plm(rain ~ lag_rain + lag_neighbor_rain + time_interval, data = district_rain, effect = "twoways", model = "within", index = "district"))
+
+# Check whether a district’s current SPI is related to (1) its lagged value and (2) the lagged value of its neighbors’ SPI. 
+summary(plm(spi ~ lag_spi + lag_neighbor_spi + time_interval, data = district_rain, effect = "twoways", model = "within", index = "district"))
+```
+**Insight:\
+From the summary of regressions, we can see that the raw level of rainfall, as well as the Standardized Precipitation Index, are not independent from one election period to the next within a district, as well as from neighboring districts from one election period to the next.\
+Specifically, from the regression statistics summary, we can see the "lag_rain" and "lag_spi" variables have a significant postive relationship while the "lag_neighbor_rain" and "lag_neighbor_spi" variables have a significant negative relationship. These results indicate that with more rainfall from previous election interval and less rainfall in the neighbourhood from previous election interval,it was more likely that the rainfall for a district duing current election interval would increase.\
+Moreover, these results suggest that the level of rainfall in a focal district is probably not independent from either its level of rainfall in the previous election period or neighboring districts’ level of rainfall in the past. Therefore, due to a lack of independence, a modification is needed to generate a statistically independent measure for droughts and floods. Let's move on to part C.**
+\
+\
+\
+(C) Meteorological scientists consider moderate droughts to occur if the Standardized Precipitation Index falls below -1, and moderate ﬂoods to occur if it rises above 1. Create a measure that sums the number of years a district experiences either moderate droughts or ﬂoods during the interval starting from the year following the previous election up until the year of the current election. Perform the same test as in (B), using this new transformed measure. 
+
+```{r, message=F, warning=F}
+# I have created the new transformed measures: 'lag_moderate_extreme_weather' and 'lag_neighbour_moderate_extreme_weather', so I only needed to put them in the pglm function. 
+summary(pglm(moderate_extreme_weather ~ lag_moderate_extreme_weather + lag_neighbor_moderate_extreme_weather + time_interval, data = district_rain, effect = "twoways", model = "within", index = "district", family = "poisson"))
+```
+**Insight:\
+Different from the result in part B, the relationship between abnormal rainfall occurances of a district and abnormal rainfall occurances from its previous period as well as its neighboring districts' abnormal rainfall occurances from previous period are both not significant. In other words, there are not significant relationships between them.\
+Therefore, we can identify "moderate_extreme_weather" as an exogenous variable that is not affected by other variables in the system. We can futher use it for exogenous variation analysis. The fact that the coefficient term for extreme weather is not statistically significant confirms that: this is a measure that is independent from one election period to the next within a district, as well as from neighboring districts from one election period to the next. I could further take this measure to be a quantification of rainfall level because the independence makes the measure robust to use as a predictive variable in regression analysis. \
+What's more, the number of years in the election period is positively related with the occurances of abonormal rainfall in a district, since the more year we include in an election interval, the more likely abnormal rainfall happened in that interval. Therefore, it is reasonable and necessary to use 'time_interval' as a control variable.**
+
+
+### Question 2
+Run a regression predicting the number of new political parties that are formed as a function of the number of years a district experiences droughts or ﬂooding in the interval starting from the year following the previous election up until the year of the current election. In this regression, we are specifying district ﬁxed eﬀects through “phet” and panel-speciﬁc autocorrelation through “psar1”. Also include a control in the regression for the number of years in the election period and a linear control for each election year. 
+\
+```{r, message=F, warning=F}
+# Before using panelVar to analyze regression, I removed the records which don't have spi data and thus not useful for analysis.
+district_complete = district_rain[!is.na(spi)]
+district_complete = data.frame(district_complete)
+
+# Run a regression predicting the number of new political parties that are formed as a function of the number of years a district experiences droughts or ﬂooding in the interval starting from the year following the previous election up until the year of the current election.
+summary(panelAR(new_parties ∼ moderate_extreme_weather + time_interval + year, data = district_complete, panelVar='district', timeVar='year', autoCorr = "psar1", panelCorrMethod = "phet", rho.na.rm = TRUE))
+```
+**Insight:\
+From the regression results, we could see that all the coefficients, including the intercept, is statistically significant. \
+Specifically, even after I included a control variable for the number of years in the election period and a linear control for each election year, the number of new political parties that are formed is still positively related with number of years a district experiences droughts or ﬂooding in the interval starting from the year following the previous election up until the year of the current election. This suggests that a high level of foundation is more likely when SPI index is higher than 1 or below than -1. \
+Logically speaking, this is because Inida is an agrarian country and extreme rainfall occurances have negative effects on its economy. Thus, during periods when weather conditions were extreme and economy was unstable, new parties were formed to coop with these social environments.**
+\
+\
+\
+```{r, message=F, warning=F}
+# Do certain kinds of political parties seem to be more likely than other kinds to be formed when a district experiences extreme weather? 
+
+# Socialist
+summary(panelAR(new_parties_socialist ∼ moderate_extreme_weather + time_interval + year, data = district_complete, panelVar='district', timeVar='year', autoCorr = "psar1", panelCorrMethod = "phet", rho.na.rm = TRUE))
+
+# Communist
+summary(panelAR(new_parties_communist ∼ moderate_extreme_weather + time_interval + year, data = district_complete, panelVar='district', timeVar='year', autoCorr = "psar1", panelCorrMethod = "phet", rho.na.rm = TRUE))
+
+# Liberal
+summary(panelAR(new_parties_liberal ∼ moderate_extreme_weather + time_interval + year, data = district_complete, panelVar='district', timeVar='year', autoCorr = "psar1", panelCorrMethod = "phet", rho.na.rm = TRUE))
+```
+**Insight:\
+Indeed, certain kinds of political parties seem to be more likely than other kinds to be formed when a district experiences extreme weather. For example, for socialits, the number of parties formed is significantly positively related to extreme weathers. While for communists and liberal, the relationships are negative.\  
+This result suggests that socialist seems to be more likely than communists or liberal to be formed when a district experiences extreme weather. Different political parties have different political appeals. It is understandable that certain parties are more sensitive to economic changes than other parties.**
+
+
+
+
+### Question 3
+Now that we have established the baseline eﬀect, we can look at how political activity stimulated by droughts or ﬂoods in one district might affect political activity in another district. Use a similar regression to Question 2 to show that, even when taking into account a district’s own droughts and ﬂoods, the level of entry of new political parties in a district will also depend on the number of years its neighboring districts experience years of droughts or ﬂooding in the interval starting from the year following two elections ago, up until the year of the previous election—the election lead-up interval before the current one. 
+\
+```{r, message=F, warning=F}
+# In this regression, I further included the variable representing the number of years neighboring districts experience years of droughts or ﬂooding in the interval starting from the year following two elections ago, up until the year of the previous election.
+summary(panelAR(new_parties ∼ moderate_extreme_weather + lag_neighbor_moderate_extreme_weather + time_interval + year, data = district_complete, panelVar='district', timeVar='year', autoCorr = "psar1", panelCorrMethod = "phet", rho.na.rm = TRUE))
+```
+**Insight:\
+In this regression, I wanted to examine whether the number of political parties formed in a district is also affected by the district's neighboring regions experiencing extreme weathers in the previous election period.\
+From the result, we can see that the coefficient of 'lag_neighbor_moderate_extreme_weather' is positive and statistically significant, indicating that extreme weathers happened in neighboring regions indeed made new political parties more likely to happen, even when taking into account a district’s own droughts and ﬂoods.\
+This is reasonable because information kept flowing from one distict to another. As a district experienced extreme weathers and the economy became unstable, its neighboring regions would also notice and started to form new parties as well. In this sense, new parties were diffused from the district that experienced extreme weathers to its neighbouring regions.**
+
+
+
+
+### Question 4
+Extreme weather events like droughts or ﬂoods can erode the stability of political systems and wear away at the entrenched power bases of large, national-scale parties that have difficulty responding to the needs of affected regions.
+\
+(A) Does experiencing droughts or ﬂoods relate differently to the entry and diffusion of political parties depending on their scope? Perform regressions, similar to Question 3, one each predicting the entry of new national, state, and regional scope parties as the outcome based on extreme weather in a district in the period leading up to the current election and based on extreme weather in neighboring districts in the period leading up to the prior election. Include a control in the regression for the number of years in the election period, a control for the time-invariant features of a district, and a linear control for each election year. 
+```{r, message=F, warning=F}
+# State scope
+summary(panelAR(new_parties_state_scope ~ moderate_extreme_weather + lag_neighbor_moderate_extreme_weather + time_interval + year, district_complete, panelVar = 'district', timeVar = 'year', autoCorr = 'psar1', panelCorrMethod = "phet", rho.na.rm = TRUE))
+
+# Regional scope
+summary(panelAR(new_parties_regional_scope ~ moderate_extreme_weather + lag_neighbor_moderate_extreme_weather + time_interval + year, district_complete, panelVar = 'district', timeVar = 'year', autoCorr = 'psar1', panelCorrMethod = "phet", rho.na.rm = TRUE))
+
+# National scope
+summary(panelAR(new_parties_national_scope ~ moderate_extreme_weather + lag_neighbor_moderate_extreme_weather + time_interval + year, district_complete, panelVar = 'district', timeVar = 'year', autoCorr = 'psar1', panelCorrMethod = "phet", rho.na.rm = TRUE))
+```
+**Insight:\
+Based on the results, it is clear that experiencing droughts or ﬂoods relate differently to the entry and diffusion of political parties depending on their scope.\
+From the regression results, we could see that the coefficient for extreme weather occurences is positive and significant only for national scope political parties; while the coefficient for neighboring regions' extreme weather occurences is positive and significant for both national scope and regional scope political parties.\ This suggests that national scope political party is most likely to be influenced by number of droughts and floods that a district experienced; state scope political party is not very related to moderate extreme weathers; while regional scope political party is not related to its own experience of extreme weathers, but more influenced by the neighboring districts’ experience of droughts and floods. \
+These results are actually reasonable. National-scope parties were typically formed because both events happened in this district and its neighbouring regions. Regional-scope parties were formed maily because of economic or weather conditions in neighbouring districts. And state-scope parties were formed because of other causes. **
+\
+\
+\
+(B) Does experiencing droughts or ﬂoods relate to political concentration? Perform a regression, similar to Question 3, predicting the Herﬁndahl Index of a region as a function of the number of years of droughts or ﬂooding that occur in a district in the interval leading up to the current election, and the number of years of droughts or ﬂooding that occur in its neighboring districts in the interval leading up to the previous election.
+```{r, message=F, warning=F}
+warning=FALSE
+summary(panelAR(political_concentration ~ moderate_extreme_weather + lag_neighbor_moderate_extreme_weather + time_interval + year, data = district_complete, panelVar='district', timeVar='year', autoCorr = "psar1", panelCorrMethod = "phet", rho.na.rm = TRUE))
+```
+**Insight:\
+From the regression results, it is clear that experiencing droughts or ﬂoods relates to political concentration. \
+Specifically, both the number of years of droughts or ﬂooding that occur in a district in the interval leading up to the current election and the number of years of droughts or ﬂooding that occur in its neighboring districts in the interval leading up to the previous election have a negative relation ship with political concentration and the relationships are statistically significant. Negative relationships indicate that the more extreme weather happens, the less the concentration political power in a district will be. \
+This is understandable because moderate extreme weather induced the formation of new political parties, thus the vote will be more diversified in those districts that have experienced a high level of droughts or floods. \
+Also, based on the magnitude of coeffiecients, the influence on political concentration of extreme weather in its neighboring districts in the interval leading up to the previous election is stronger than that of the number of years of droughts or ﬂooding that occur in a district in the interval leading up to the current election.**
+
+
+
+
+### Question 5
+Political parties are formed to accomplish a variety of goals. Individual parties can also exist in the context of larger social and cultural trends, especially when regions inﬂuence each other as political organizing activity diﬀuses across regions over time. To understand the diﬀusion process more, we want to analyze whether the new parties that appear in a district are the same parties that have appeared in neighboring districts in the past,orifittheprocessofpoliticalorganization,ratherthanthecontentofaspeciﬁcpolitical party, that is diffusing. To analyze this, run two separate regressions predicting the likelihood of (1) new political parties being founded in a district, that have contested an election in a neighboring district in any previous election period, and (2) new political parties being founded in a district that have not contested an election in a neighboring district in any previous election period. As in Questions 3 and 4, estimate these as a function of the number of years of droughts or ﬂooding that occur in a district in the interval leading up to the current election and the years of droughts or ﬂooding that occur that occur in its neighboring districts in the period leading up to the prior election. Include as controls in the regression the number of years in the election period, the timeinvariant features of a district, and a linear control for the election year. What does the results illustrate about the level and process diﬀusion of political organizing?
+
+```{r, message=F, warning=F}
+# Load data of new parties into a data frame. I only kept districts that are in my major data table.
+parties = fread("new_parties_in_each_district_by_candidate.csv", header = TRUE)
+parties = unique(parties[,c("district", "year","party_name")])
+colnames(parties)[colnames(parties) == "party_name"] = "party"
+parties = parties[district %in% district_complete$district]
+setorderv(parties, c("district", "year"))
+parties <- data.frame(parties)
+district_complete <- data.frame(district_complete)
+
+# In this for-loop, I identified each newly formed party as either has contested an election in a neighboring district in any previous election period or has not contested an election in a neighboring district in any previous election period. "1" represents has appeared in neighboring district before, and "0" represents has not.
+for(i in 1:nrow(parties)){
+  position <- (as.character(unlist(unique(district_rain$district))) == as.character(unlist(parties[i,1])))
+  neighbor_parties <- unique(parties[parties$year<parties[i,2]&parties$district%in%unlist(neighbor_list[position]),3])
+  if(parties[i,3] %in% neighbor_parties){
+    parties[i,'Difussed'] <- 1
+  }else{
+    parties[i,'Difussed'] <- 0
+  }
+}
+
+# In this for-loop, for each district I then summed the total number of new parties diffused from neighbouring districts. 
+for(i in 1:nrow(district_complete)){
+  district_complete[i,'Difussed_Parties'] <-    sum(parties[parties$district==district_complete[i,1]&parties$year==district_complete[i,2],4])
+}
+
+# Create the counterpart: "Non_Diffused_Parties", which are the number of new parties that have never contested an election in a neighboring district in any previous election period.
+district_complete$Non_Difussed_Parties <- district_complete$new_parties - district_complete$Difussed_Parties
+
+# Take a look at the two new target variables.
+print(district_complete[1:5,c(1,2,46,47)])
+```
+
+```{r, message=F, warning=F}
+# Run the regressions with both target variables. I still used extreme weather occurances as predictor, time_interval and year as control variables.
+summary(panelAR(Difussed_Parties ~ moderate_extreme_weather + time_interval + year, data = district_complete, panelVar='district', timeVar='year', autoCorr = "psar1", panelCorrMethod = "phet", rho.na.rm = TRUE))
+
+summary(panelAR(Non_Difussed_Parties ~ moderate_extreme_weather + time_interval + year, data = district_complete, panelVar='district', timeVar='year', autoCorr = "psar1", panelCorrMethod = "phet", rho.na.rm = TRUE))
+```
+**Insights:\
+In these regressions, I would like to understand the diffusion process by analyzing whether the new parties that appear in a district are the same parties that have appeared in neighboring districts in the past.\
+Based on the result, we can see that new parties formed in a district that are previously formed in its neighboring distrcits have no significant relationship with extreme weather occuring. On the contrary, new parties in a district that are not previously formed in its neighboring distrcits indeed have significant negative relationship with extreme weather occuring. If a political party has existed in a district’s neighboring districts, it will naturally diffuse over time, no matter whether extreme weather exists or not. However, if a political party is newly formed and has never existed in a district’s neighboring districts before, it is highly likely to be positively influenced by moderate extreme weather.\
+These results denote that the diffusion process of political organizing affected by weather conditions is based on individual-level. Individuals in a district were forming their own unique parties after extreme weathers occuring in their districts, so these parties tend to be brand-new. As for the process of the diffusion of political organizing, we can see that the difusion process indeed exists. When extreme weathers happened, the founding of new parties in a district would affect its neighbouring regions.**
