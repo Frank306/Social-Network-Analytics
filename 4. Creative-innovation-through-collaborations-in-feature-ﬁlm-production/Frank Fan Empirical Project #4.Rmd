@@ -1,0 +1,803 @@
+---
+title: "Empirical Assignment 4 - Frank Fan"
+output: html_notebook
+---
+\
+
+### Brief Introduction:
+This exercise analyzes production companies of feature ﬁlms and the ﬁlms that they make. Filmmakers are in the fascinating position in which—unlike some other kinds of ﬁrms—they must constantly release novel, creative products that are ﬁnely tuned into uncertain and ever-changing audience demand. Many organizations struggle to adapt to changing environments and demand, and struggle to remain competitive—consider the position of a ﬁrm IBM today, as opposed to twenty years ago. In this home work, I analyzed the pattern of film production collaboration to find the correct strategy for filmmakers today.
+
+## Loading packages and data
+```{r, warning=FALSE, message=FALSE}
+library(data.table)
+library(dplyr)
+library(plyr)
+library(ggplot2)
+library(MASS)
+library(proxy)
+library(igraph)
+
+producers<-read.csv("producers_and_films.csv")
+keyword<-read.csv("film_keywords.csv")
+box<-read.csv("box_office_revenues.csv")
+subsidiary<-read.csv("production_subsidiaries.csv")
+```
+
+## Data Cleaning
+```{r}
+producers_us<-producers[producers$country=='us',]
+producers_us<-as.data.table(producers_us)
+# Base one measure on the scale of a company’s productions: consider a production company to be a generalist if it is in the top quartile of the number of ﬁlms released by producers that year. In general, a producer will be classiﬁed as a generalist if it makes more than one ﬁlm in a year. 
+producers_us[, generalist_measure_one :=  .N, by = c("year", "pcindex")]
+producers_us[, generalist_one := ifelse(generalist_measure_one > 1, "generalist", "specialist")]
+# Classify each film as co-produced or solo-produced
+producers_us[, single_co := ifelse(.N > 1, "co-produced", "solo-produced"), by = "pindex"]
+producers_us[, type_measure_one := ifelse(single_co == "solo-produced", 
+                                        ifelse(generalist_one=='specialist', "Peripheral solo-production", 
+                                        "Central solo-production"),ifelse(length(unique(generalist_measure_one))>1, 
+                                          "Hybrid co-production",ifelse(unique(generalist_one)=='specialist',
+                                          "Peripheral co-production", "Central co-production"))), by ="pindex"]
+```
+
+
+## Question 1a
+```{r,message=FALSE,warning=FALSE}
+producers_us[, operation_years :=year-min(year),by="pcindex"]
+
+# Join the producers table with the result table
+producers_us<-left_join(producers_us,box,by="pindex")
+producers_us<-setDT(left_join(producers_us,subsidiary,by="pcindex"))
+# Add a column to indicate whether the company is a subsidary in the particular year
+producers_us[, subsidiary := ifelse(!is.na(first_year),ifelse((year>first_year) & (year<last_year),1L,0),0)]
+
+# I submitted this file for your reference
+write.csv(producers_us,"producers_us.csv")
+```
+
+```{r}
+# merge keyword with film table, only keep observations that exist in the producers table
+producers_us_short<-producers_us[,1:2]
+join_key<-data.table(unique(inner_join(unique(producers_us_short),unique(keyword),by="pindex")))
+
+# determine if the keyword is new, first let's get which year the word first appeared
+join_key[, first_appearance := min(year),by="keyword"]
+# if the time span since the first appearance is less than three years, classify the word as new
+join_key[, time_span := year-first_appearance]
+join_key[, old_or_new:= ifelse(time_span <=3,'new','old')]
+join_key[,time_span:=NULL]
+join_key[,first_appearance:=NULL]
+
+# Count how many new words for each film
+join_key[,count_new_words := sum(old_or_new=="new"),by=c("pindex","year")]
+
+# Check the current keyword data table
+print(join_key[1:5,])
+```
+
+```{r}
+# Divide the tables into five different types
+join_key <- left_join(join_key,producers_us[,c("type_measure_one","pindex")],by='pindex')
+central_solo <- subset(join_key,type_measure_one=="Central solo-production")
+peripheral_solo <- subset(join_key,type_measure_one=="Peripheral solo-production")
+hybrid_co <- subset(join_key,type_measure_one=="Peripheral solo-production")
+central_co <- subset(join_key,type_measure_one=="Peripheral solo-production")
+peripheral_co <- subset(join_key,type_measure_one=="Peripheral co-production")
+# Let's take a quick look at central_solo as an example
+print(central_solo[1:5,])
+```
+### What have I done:\
+Up to this point, I have classified each ﬁlm by the type of collaboration that it represents. There should be ﬁve types for each measure of generalism: Central solo-production, Peripheral solo-production, Peripheral co-production, Central co-production and hybrid co-production.\
+The next step is creating five ﬁgures that illustrates the number of new keywords and new combinations of existing keywords that are introduced for each type of ﬁlm over the course of the data.
+
+### Central solo-production:
+```{r}
+# Transfer the datatable into a dataframe
+central_solo<- data.frame(central_solo)
+# Split the dataframe by year.
+word_by_year<-split(central_solo,central_solo$year)
+# Here I created empty dataframes and empty lists that would be populated in the for loop below
+film_k<-data.frame()
+store<-data.frame()
+count_combn<-list()
+count_words<-list()
+year_list<-list()
+store_combn <- list()
+all_new_combn <- data.frame()
+for (year in 1:33){
+  # Here d is a dataframe containing data in the selected year
+  d<-as.data.frame(word_by_year[year])
+  colnames(d)<-c("pindex","year","keyword","old_or_new","count_new_words")
+  # This_year is just the selected year. For example, if year=1, this_year is 1985.
+  this_year<-unique(d$year)
+  # Save each year's data one by one into the dataframe that I have created before.
+  store<-rbind(store,d)
+  if (year<=4){
+    # If the year index <4, all keywords or combinations would be considered new since we don't have previous data.
+    new<-length(unique(na.omit(d$keyword)))
+    count_film<-as.data.frame((count(d$pindex)))
+    film_k<-rbind(film_k,count_film)
+    #new combinations
+    old<-na.omit(d[unique(d$keyword),])
+    old<-as.data.table(old)
+    old[, min_two := .N > 1, by ='pindex']
+    old = old[min_two==TRUE]
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), .(`pindex`)]
+      combn[combn$V1!=combn$V2,]
+    }
+    store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+    count_combn<-c(count_combn,nrow(unique(combn[,c("V1","V2")])))
+    count_words<-c(count_words,unique(new))
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    year_list<-c(year_list,this_year)
+  }
+  else{
+    # By creating a variable called previous_year, I subsetted the data into a dataframe that only contains the previous          # years data before the recent three years.
+    previous_year<-(d$year-4)[1]
+    before3<-subset(store,year<=previous_year)
+    # The varibale old is the keywords that have appeared before the recent three years.
+    old <- na.omit(d[(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    old <- as.data.table(old)
+    # Then I only wanted the "old" keyword dataframe to contain minimum two keywords per film so that there is a combination.
+    old[, min_two := .N > 1, by ="pindex"]
+    old = old[min_two==TRUE]
+    # In this for loop below, I created the combinations of keywords per company. And store all combinations up to the recent     # three years in the before3_combn dataframe.
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), by=c('pindex','year')]
+      combn[combn$V1!=combn$V2,]
+      store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+      before3_combn<-subset(store_combn,year<=previous_year)
+    }
+    # New combinations are the combinations of keywords that have not appeared in before3_combn.
+    new_combn<- combn[V1 %in% before3_combn$V1 & V2 %in% before3_combn$V2]
+    # Store all new combinations in a big datatable
+    all_new_combn <- unique(rbind(all_new_combn, new_combn[,c("pindex","V1","V2")]))
+    
+    # New keywords are the keywords that have not appeared in before3.
+    new <-nrow(d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    # 
+    film<-d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),]
+    count_film<-as.data.frame((count(film$pindex)))
+    film_k<-rbind(film_k,count_film)
+
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    count_combn<-c(count_combn,nrow(unique(new_combn[,c("V1","V2")])))
+    rm(new_combn)
+    count_words<-c(count_words,unique(new))
+    year_list<-c(year_list,this_year)
+  }
+}
+#aggregate keywords by film
+colnames(film_k)<-c("pindex","freq")
+film_k<-as.data.table(film_k)
+all_film<-data.frame()
+all_film<-rbind(all_film,film_k)
+
+# Unlist our counts of new words and new combinations
+count_d<-data.frame(unlist(count_words))
+year_d<-data.frame(unlist(year_list))
+combn_d<-data.frame(unlist(count_combn))
+# Put count information into a 'bind' datatable for plotting
+bind<-data.frame(cbind(year_d,count_d,combn_d))
+bind[33,'year']<-2017
+colnames(bind)<-c("year","number_of_new_keywords","number_of_new_combinations")
+# Plot the number of new keywords or new combinations against yeaars.
+ggplot(data=bind, aes(year, number_of_new_keywords+number_of_new_combinations)) +
+  geom_line(linetype = "dashed")+
+  geom_point()
+```
+From the visualization, we can see that central solo-produced films have the peak of number of new words and new combinations of existing words before 1995. The number of new words and new combinations indicate the level of creativity. After 2000, the creativity level of solo-produced films never bounced back.\
+
+
+### Central co-production:
+```{r}
+# Transfer the datatable into a dataframe
+central_co<- data.frame(central_co)
+# Split the dataframe by year.
+word_by_year<-split(central_co,central_co$year)
+# Here I created empty dataframes and empty lists that would be populated in the for loop below
+film_k<-data.frame()
+store<-data.frame()
+count_combn<-list()
+count_words<-list()
+year_list<-list()
+store_combn <- data.frame()
+for (year in 1:34){
+  # Here d is a dataframe containing data in the selected year
+  d<-as.data.frame(word_by_year[year])
+  colnames(d)<-c("pindex","year","keyword","old_or_new","count_new_words")
+  # This_year is just the selected year. For example, if year=1, this_year is 1985.
+  this_year<-unique(d$year)
+  # Save each year's data one by one into the dataframe that I have created before.
+  store<-rbind(store,d)
+  if (year<=4){
+    # If the year index <4, all keywords or combinations would be considered new since we don't have previous data.
+    new<-length(unique(na.omit(d$keyword)))
+    count_film<-as.data.frame((count(d$pindex)))
+    film_k<-rbind(film_k,count_film)
+    #new combinations
+    old<-na.omit(d[unique(d$keyword),])
+    old<-as.data.table(old)
+    old[, min_two := .N > 1, by ='pindex']
+    old = old[min_two==TRUE]
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), .(`pindex`)]
+      combn[combn$V1!=combn$V2,]
+    }
+    store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+    count_combn<-c(count_combn,nrow(unique(combn[,c("V1","V2")])))
+    count_words<-c(count_words,unique(new))
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    year_list<-c(year_list,this_year)
+  }
+  else{
+    # By creating a variable called previous_year, I subsetted the data into a dataframe that only contains the previous          # years data before the recent three years.
+    previous_year<-(d$year-4)[1]
+    before3<-subset(store,year<=previous_year)
+    # The varibale old is the keywords that have appeared before the recent three years.
+    old <- na.omit(d[(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    old <- as.data.table(old)
+    # Then I only wanted the "old" keyword dataframe to contain minimum two keywords per film so that there is a combination.
+    old[, min_two := .N > 1, by ="pindex"]
+    old = old[min_two==TRUE]
+    # In this for loop below, I created the combinations of keywords per company. And store all combinations up to the recent     # three years in the before3_combn dataframe.
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), by=c('pindex','year')]
+      combn[combn$V1!=combn$V2,]
+      store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+      before3_combn<-subset(store_combn,year<=previous_year)
+    }
+    # New combinations are the combinations of keywords that have not appeared in before3_combn.
+    new_combn<- combn[V1 %in% before3_combn$V1 & V2 %in% before3_combn$V2]
+    # Store all new combinations in a big datatable
+    all_new_combn <- unique(rbind(all_new_combn, new_combn[,c("pindex","V1","V2")]))
+    
+    # New keywords are the keywords that have not appeared in before3.
+    new <-nrow(d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    # 
+    film<-d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),]
+    count_film<-as.data.frame((count(film$pindex)))
+    film_k<-rbind(film_k,count_film)
+
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    count_combn<-c(count_combn,nrow(unique(new_combn[,c("V1","V2")])))
+    rm(new_combn)
+    count_words<-c(count_words,unique(new))
+    year_list<-c(year_list,this_year)
+  }
+}
+#aggregate keywords by film
+colnames(film_k)<-c("pindex","freq")
+film_k<-as.data.table(film_k)
+all_film<-data.frame()
+all_film<-rbind(all_film,film_k)
+
+# Unlist our counts of new words and new combinations
+count_d<-data.frame(unlist(count_words))
+year_d<-data.frame(unlist(year_list))
+combn_d<-data.frame(unlist(count_combn))
+# Put count information into a 'bind' datatable for plotting
+bind<-data.frame(cbind(year_d,count_d,combn_d))
+bind[17,1]<-2007
+colnames(bind)<-c("year","number_of_new_keywords","number_of_new_combinations")
+# Plot the number of new keywords or new combinations against yeaars.
+ggplot(data=bind, aes(year, number_of_new_keywords+number_of_new_combinations)) +
+  geom_line(linetype = "dashed")+
+  geom_point()
+```
+Generally speaking, central co-produced films have higher level of creativity than central-solo produced films. The peak appears at 2015.This result is very intersting: could collaboration stimulate innovativity of individual film producers? Let's keep looking at other type's results.\
+
+### Peripheral solo-production:
+```{r}
+peripheral_solo<- data.frame(peripheral_solo)
+word_by_year<-split(peripheral_solo,peripheral_solo$year)
+film_k<-data.frame()
+store<-data.frame()
+count_combn<-list()
+count_words<-list()
+year_list<-list()
+store_combn <- list()
+for (year in 1:34){
+ # Here d is a dataframe containing data in the selected year
+  d<-as.data.frame(word_by_year[year])
+  colnames(d)<-c("pindex","year","keyword","old_or_new","count_new_words")
+  # This_year is just the selected year. For example, if year=1, this_year is 1985.
+  this_year<-unique(d$year)
+  # Save each year's data one by one into the dataframe that I have created before.
+  store<-rbind(store,d)
+  if (year<=4){
+    # If the year index <4, all keywords or combinations would be considered new since we don't have previous data.
+    new<-length(unique(na.omit(d$keyword)))
+    count_film<-as.data.frame((count(d$pindex)))
+    film_k<-rbind(film_k,count_film)
+    #new combinations
+    old<-na.omit(d[unique(d$keyword),])
+    old<-as.data.table(old)
+    old[, min_two := .N > 1, by ='pindex']
+    old = old[min_two==TRUE]
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), .(`pindex`)]
+      combn[combn$V1!=combn$V2,]
+    }
+    store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+    count_combn<-c(count_combn,nrow(unique(combn[,c("V1","V2")])))
+    count_words<-c(count_words,unique(new))
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    year_list<-c(year_list,this_year)
+  }
+  else{
+    # By creating a variable called previous_year, I subsetted the data into a dataframe that only contains the previous          # years data before the recent three years.
+    previous_year<-(d$year-4)[1]
+    before3<-subset(store,year<=previous_year)
+    # The varibale old is the keywords that have appeared before the recent three years.
+    old <- na.omit(d[(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    old <- as.data.table(old)
+    # Then I only wanted the "old" keyword dataframe to contain minimum two keywords per film so that there is a combination.
+    old[, min_two := .N > 1, by ="pindex"]
+    old = old[min_two==TRUE]
+    # In this for loop below, I created the combinations of keywords per company. And store all combinations up to the recent     # three years in the before3_combn dataframe.
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), by=c('pindex','year')]
+      combn[combn$V1!=combn$V2,]
+      store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+      before3_combn<-subset(store_combn,year<=previous_year)
+    }
+    # New combinations are the combinations of keywords that have not appeared in before3_combn.
+    new_combn<- combn[V1 %in% before3_combn$V1 & V2 %in% before3_combn$V2]
+    # Store all new combinations in a big datatable
+    all_new_combn <- unique(rbind(all_new_combn, new_combn[,c("pindex","V1","V2")]))
+    
+    # New keywords are the keywords that have not appeared in before3.
+    new <-nrow(d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    # 
+    film<-d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),]
+    count_film<-as.data.frame((count(film$pindex)))
+    film_k<-rbind(film_k,count_film)
+
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    count_combn<-c(count_combn,nrow(unique(new_combn[,c("V1","V2")])))
+    rm(new_combn)
+    count_words<-c(count_words,unique(new))
+    year_list<-c(year_list,this_year)
+  }
+}
+#aggregate keywords by film
+colnames(film_k)<-c("pindex","freq")
+film_k<-as.data.table(film_k)
+all_film<-data.frame()
+all_film<-rbind(all_film,film_k)
+
+# Unlist our counts of new words and new combinations
+count_d<-data.frame(unlist(count_words))
+year_d<-data.frame(unlist(year_list))
+combn_d<-data.frame(unlist(count_combn))
+# Put count information into a 'bind' datatable for plotting
+bind<-data.frame(cbind(year_d,count_d,combn_d))
+bind[33,1]<-2017
+bind[34,1]<-2018
+colnames(bind)<-c("year","number_of_new_keywords","number_of_new_combinations")
+# Plot the number of new keywords or new combinations against yeaars.
+ggplot(data=bind, aes(year, number_of_new_keywords+number_of_new_combinations)) +
+  geom_line(linetype = "dashed")+
+  geom_point()
+```
+Peripheral solo-produced films have a lot more new keywords and new combinations of existing key words compared to the previous two types, partly because there are a lot more specialists than generalists in our datasets: most film producers tend to focus on one film per year. The trend is different for peripheral solo-produced films too: their peak of innovativity comes after 2010. \
+
+### Peripheral co-production:\
+```{r}
+peripheral_co<- data.frame(peripheral_co)
+word_by_year<-split(peripheral_co,peripheral_co$year)
+film_k<-data.frame()
+store<-data.frame()
+count_combn<-list()
+count_words<-list()
+year_list<-list()
+store_combn <- list()
+for (year in 1:34){
+  # Here d is a dataframe containing data in the selected year
+  d<-as.data.frame(word_by_year[year])
+  colnames(d)<-c("pindex","year","keyword","old_or_new","count_new_words")
+  # This_year is just the selected year. For example, if year=1, this_year is 1985.
+  this_year<-unique(d$year)
+  # Save each year's data one by one into the dataframe that I have created before.
+  store<-rbind(store,d)
+  if (year<=4){
+    # If the year index <4, all keywords or combinations would be considered new since we don't have previous data.
+    new<-length(unique(na.omit(d$keyword)))
+    count_film<-as.data.frame((count(d$pindex)))
+    film_k<-rbind(film_k,count_film)
+    #new combinations
+    old<-na.omit(d[unique(d$keyword),])
+    old<-as.data.table(old)
+    old[, min_two := .N > 1, by ='pindex']
+    old = old[min_two==TRUE]
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), .(`pindex`)]
+      combn[combn$V1!=combn$V2,]
+    }
+    store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+    count_combn<-c(count_combn,nrow(unique(combn[,c("V1","V2")])))
+    count_words<-c(count_words,unique(new))
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    year_list<-c(year_list,this_year)
+  }
+  else{
+    # By creating a variable called previous_year, I subsetted the data into a dataframe that only contains the previous          # years data before the recent three years.
+    previous_year<-(d$year-4)[1]
+    before3<-subset(store,year<=previous_year)
+    # The varibale old is the keywords that have appeared before the recent three years.
+    old <- na.omit(d[(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    old <- as.data.table(old)
+    # Then I only wanted the "old" keyword dataframe to contain minimum two keywords per film so that there is a combination.
+    old[, min_two := .N > 1, by ="pindex"]
+    old = old[min_two==TRUE]
+    # In this for loop below, I created the combinations of keywords per company. And store all combinations up to the recent     # three years in the before3_combn dataframe.
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), by=c('pindex','year')]
+      combn[combn$V1!=combn$V2,]
+      store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+      before3_combn<-subset(store_combn,year<=previous_year)
+    }
+    # New combinations are the combinations of keywords that have not appeared in before3_combn.
+    new_combn<- combn[V1 %in% before3_combn$V1 & V2 %in% before3_combn$V2]
+    # Store all new combinations in a big datatable
+    all_new_combn <- unique(rbind(all_new_combn, new_combn[,c("pindex","V1","V2")]))
+    
+    # New keywords are the keywords that have not appeared in before3.
+    new <-nrow(d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    # 
+    film<-d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),]
+    count_film<-as.data.frame((count(film$pindex)))
+    film_k<-rbind(film_k,count_film)
+
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    count_combn<-c(count_combn,nrow(unique(new_combn[,c("V1","V2")])))
+    rm(new_combn)
+    count_words<-c(count_words,unique(new))
+    year_list<-c(year_list,this_year)
+  }
+}
+#aggregate keywords by film
+colnames(film_k)<-c("pindex","freq")
+film_k<-as.data.table(film_k)
+all_film<-data.frame()
+all_film<-rbind(all_film,film_k)
+
+
+# Unlist our counts of new words and new combinations
+count_d<-data.frame(unlist(count_words))
+year_d<-data.frame(unlist(year_list))
+combn_d<-data.frame(unlist(count_combn))
+# Put count information into a 'bind' datatable for plotting
+bind<-data.frame(cbind(year_d,count_d,combn_d))
+bind[33,1]<-2017
+bind[34,1]<-2018
+colnames(bind)<-c("year","number_of_new_keywords","number_of_new_combinations")
+# Plot the number of new keywords or new combinations against yeaars.
+ggplot(data=bind, aes(year, number_of_new_keywords+number_of_new_combinations)) +
+  geom_line(linetype = "dashed")+
+  geom_point()
+```
+Peripheral co-produced films also have a lot more new keywords and new combinations of existing key words compared to central-produced films. The trend is similar to peripheral solo-produced films. Innovativity level indicated by the number of new keywords plus the number of new combinations of existing key words hitted new high after 2010. We can then come to the solution: films made by specialists started to become more innovative while films made by generalists became less creative. This actually corresponds to common sense as we see more and more Disney movies or Marvel movies (typical generalists) used the same key words or combinations again and again, whereas specialists such as small niche producers keep coming up with new key words or concepts for new films.\
+
+### Hybrid co-production:\
+```{r}
+hybrid_co<- data.frame(hybrid_co)
+word_by_year<-split(hybrid_co,hybrid_co$year)
+film_k<-data.frame()
+store<-data.frame()
+count_combn<-list()
+count_words<-list()
+year_list<-list()
+store_combn <- list()
+for (year in 1:33){
+  # Here d is a dataframe containing data in the selected year
+  d<-as.data.frame(word_by_year[year])
+  colnames(d)<-c("pindex","year","keyword","old_or_new","count_new_words")
+  # This_year is just the selected year. For example, if year=1, this_year is 1985.
+  this_year<-unique(d$year)
+  # Save each year's data one by one into the dataframe that I have created before.
+  store<-rbind(store,d)
+  if (year<=4){
+    # If the year index <4, all keywords or combinations would be considered new since we don't have previous data.
+    new<-length(unique(na.omit(d$keyword)))
+    count_film<-as.data.frame((count(d$pindex)))
+    film_k<-rbind(film_k,count_film)
+    #new combinations
+    old<-na.omit(d[unique(d$keyword),])
+    old<-as.data.table(old)
+    old[, min_two := .N > 1, by ='pindex']
+    old = old[min_two==TRUE]
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), .(`pindex`)]
+      combn[combn$V1!=combn$V2,]
+    }
+    store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+    count_combn<-c(count_combn,nrow(unique(combn[,c("V1","V2")])))
+    count_words<-c(count_words,unique(new))
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    year_list<-c(year_list,this_year)
+  }
+  else{
+    # By creating a variable called previous_year, I subsetted the data into a dataframe that only contains the previous          # years data before the recent three years.
+    previous_year<-(d$year-4)[1]
+    before3<-subset(store,year<=previous_year)
+    # The varibale old is the keywords that have appeared before the recent three years.
+    old <- na.omit(d[(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    old <- as.data.table(old)
+    # Then I only wanted the "old" keyword dataframe to contain minimum two keywords per film so that there is a combination.
+    old[, min_two := .N > 1, by ="pindex"]
+    old = old[min_two==TRUE]
+    # In this for loop below, I created the combinations of keywords per company. And store all combinations up to the recent     # three years in the before3_combn dataframe.
+    if (nrow(old)>1){
+      combn<-old[,as.data.table(t(combn(keyword,2))), by=c('pindex','year')]
+      combn[combn$V1!=combn$V2,]
+      store_combn<- rbind(store_combn,combn[,c("pindex",'V1','V2')])
+      before3_combn<-subset(store_combn,year<=previous_year)
+    }
+    # New combinations are the combinations of keywords that have not appeared in before3_combn.
+    new_combn<- combn[V1 %in% before3_combn$V1 & V2 %in% before3_combn$V2]
+    # Store all new combinations in a big datatable
+    all_new_combn <- unique(rbind(all_new_combn, new_combn[,c("pindex","V1","V2")]))
+    
+    # New keywords are the keywords that have not appeared in before3.
+    new <-nrow(d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),])
+    # 
+    film<-d[!(unique(na.omit(d$keyword))) %in% (unique(na.omit(before3$keyword))),]
+    count_film<-as.data.frame((count(film$pindex)))
+    film_k<-rbind(film_k,count_film)
+
+    # Let's store the count of new combinations this year in count_combn and the count of new words this year in count_words.
+    count_combn<-c(count_combn,nrow(unique(new_combn[,c("V1","V2")])))
+    rm(new_combn)
+    count_words<-c(count_words,unique(new))
+    year_list<-c(year_list,this_year)
+  }
+}
+#aggregate keywords by film
+colnames(film_k)<-c("pindex","freq")
+film_k<-as.data.table(film_k)
+all_film<-data.frame()
+all_film<-rbind(all_film,film_k)
+
+# Unlist our counts of new words and new combinations
+count_d<-data.frame(unlist(count_words))
+year_d<-data.frame(unlist(year_list))
+combn_d<-data.frame(unlist(count_combn))
+# Put count information into a 'bind' datatable for plotting
+bind<-data.frame(cbind(year_d,count_d,combn_d))
+bind[33,1]<-2017
+colnames(bind)<-c("year","number_of_new_keywords","number_of_new_combinations")
+# Plot the number of new keywords or new combinations against yeaars.
+ggplot(data=bind, aes(year, number_of_new_keywords+number_of_new_combinations)) +
+  geom_line(linetype = "dashed")+
+  geom_point()
+```
+Once again, I am not surprised to see hybrid co-produced films generated the most amount of new words and new combinations of existing words because most films are hybrid co-produced and the y-axis is a sum measurement. But we can still see the trend differs from previous plots for other types.\
+
+### Conclustion for 1a:\
+To summarize the results from five plots, I found two things: \
+1. Collaboration does faciliate innovation. Generally speaking, co-produced films (either between large producers or small producers) are more creative and generated more new keywords and new combinations of existing key words than solo-produced films.\
+2. There are certain types of collaboration that are more useful for innovativity. Collaborations between large, “generalist” production companies are far less innovative than collaborations between large producers and more specialized, smaller producers. I believe that collaboration between large generalist producers such as Disney or Marvel movies tend to keep using existing key words that they know will work in the market. But collaboration between different sizes of production companies can better spark creativity, which is why hybrid co-produced films generated the most new keywords or combinations of them all.
+
+
+
+## Question 1b
+For each measure of generalism, estimate one regression predicting the number of new keywords and another regression predicting the number of new combinations of existing key words producers introduced each year.
+```{r}
+# Count new combinations of existing words by film. And then create a clean data table for films.
+all_new_combn <- unique(all_new_combn[all_new_combn$V1!=all_new_combn$V2,])
+all_new_word <- unique(join_key[join_key$old_or_new=='new',])
+```
+
+I then created three control variables: Count number of Central co-productions a producer made that year; number of Peripheral co-productions a producer made that year; number of Hybrid co-productions a producer made that year 
+```{r}
+# Count number of Central co-productions a producer made that year; number of Peripheral co-productions a producer made that year; number of Hybrid co-productions a producer made that year 
+producers_us[, count_central_co := sum(type_measure_one == "Central co-production"), by=.(year, pcindex)]
+producers_us[, count_central_solo := sum(type_measure_one == "Central solo-production"), by=.(year, pcindex)]
+producers_us[, count_peripheral_co := sum(type_measure_one == "Peripheral co-production"), by=.(year, pcindex)]
+producers_us[, count_peripheral_solo := sum(type_measure_one == "Peripheral solo-production"), by=.(year, pcindex)]
+producers_us[, count_hybrid_co := sum(type_measure_one == "Hybrid co-production"), by=.(year, pcindex)]
+producers_us[, total_film := .N, by = c("year", "pcindex")]
+write.csv(producers_us,"producers_us.csv")
+write.csv(all_new_word,"all_new_word.csv")
+```
+
+In the code below, I joined the all_new_word table and all_new_combn table into my main data table. Later, I am going to predict the number of new key words and new combinations using predictors from the main data table.
+```{r}
+pivot_new_word <- data.table(left_join(all_new_word, producers_us[,c('pindex','pcindex')],by='pindex'))
+pivot_new_word <- pivot_new_word[, .(count_new_words_by_company = uniqueN(keyword)), by = c("year", "pcindex")]
+pivot_new_combn <- data.table(left_join(all_new_combn, producers_us[,c('year','pindex','pcindex')],by='pindex'))
+pivot_new_combn <- pivot_new_combn[, .(count_new_combn_by_company = uniqueN(c(V1, V2))), by = c("year", "pcindex")]
+write.csv(pivot_new_word,"pivot_new_word.csv")
+write.csv(pivot_new_combn,"pivot_new_combn.csv")
+pivot_producers_us <- left_join(producers_us,pivot_new_word[,c('year','pcindex','count_new_words_by_company')],by = c("year","pcindex"))
+pivot_producers_us <- left_join(pivot_producers_us,pivot_new_combn[,c('year','pcindex','count_new_combn_by_company')],by = c("year","pcindex"))
+# This is the data table that we will use for regression analysis.
+write.csv(pivot_producers_us,"pivot_producers_us.csv")
+```
+
+We still need two more control variables to control the effect that some genres of films are more creative than others. To control this effect, I performed multi-dimentional scaling using two dimensions that uses as the input the Jaccard distance between each producer based on the co-occurrence—the overlap—of keywords that they use in their ﬁlms. To account for the natural time cycle of the production process, use as the comparison set for similarity the current year as well as the two years before the current year. 
+```{r}
+all_new_word <- read.csv("all_new_word.csv")
+producers_us <- read.csv("producers_us.csv")
+
+pivot_new_word <- unique(data.table(left_join(all_new_word,producers_us[,c('pindex','pcindex')],by='pindex'))[,c('pcindex','keyword','pindex','year')])
+
+coorvar <- data.frame()
+avgDist <- data.frame()
+year_list <- list(unique(all_new_word$year))
+for(i in year_list){
+  # Only take data in the recent three years for year i
+  d <- subset(pivot_new_word,year<=i&year>=i-2)
+  d2 <- d[,c('pcindex','keyword')]
+  # Create an incidence/affiliation matrix where on one dimension, e.g., rows, are the production companies and on the other,   e.g., columns are the keywords used in each production companies films. 
+  affiliation_matrix <- as.data.frame.matrix(table(unique(d2)))
+  affiliation_matrix <-affiliation_matrix[,!apply(affiliation_matrix,2,function(x) all(x==0))]
+  # Here I store the coordinates for each company in each year in a data table "coorvar"
+  coorvar_this_yar[,'pcindex'] <- rownames(affiliation_matrix)
+  coorvar_this_year[,'year'] <- i
+  coorvar_this_yar[,c('C1','C2')] <- cmdscale(dist(affiliation_matrix))
+  coorvar <- rbind(coorvar,coorvar_this_yar)
+  # Also, I store the average jaccard distance for each company in each year in a data table "avgDist"
+  avgDist_this_year[,'pcindex'] <- rownames(affiliation_matrix)
+  avgDist_this_year[,'year'] <- i
+  avgDist_this_year[,'average_jaccard_distance'] <- rowMeans(affiliation_matrix, na.rm=TRUE)
+  avgDist <- rbind(avgDist,avgDist_this_year)
+}
+write.csv(avgDist, "avgDist.csv")
+write.csv(coorvar,"coorvar.csv")
+```
+
+```{r}
+# This code took me a long time to run, so I just read in the file in after the first run.
+coorvar <- read.csv("coorvar.csv")[,2:5]
+print(coorvar[1:10,])
+```
+Here in the output table, I have successfully created two coordinates for each company per year, indicating the content similarity of one producer to others.\
+
+Let's take a look at our regression data table used for regression.
+```{r,message=FALSE,warning=FALSE}
+pivot_producers_us <- read.csv("pivot_producers_us.csv")[,2:26]
+pivot_producers_us<-left_join(pivot_producers_us,coorvar,by=c("pcindex","year"))
+# Take a final look at the independent variables and predictors before regession
+print(pivot_producers_us[2：3,c(4,17:27)])
+```
+
+In the regression,  we have the count of films a company produced that year that fall into each of the three co-production types. Also included control variables for a producer’s box office revenue that year, how many years the producer has been in operation, whether or not the producer is a subsidiary, and a time trend for each year. At last, I included the two innovative coordinates in the regression.
+```{r}
+glm_new_word <- glm.nb(count_new_words_by_company ∼ count_central_co+count_peripheral_co+count_hybrid_co + C1 + C2 + total_box + operation_years + subsidiary + year, pivot_producers_us, offset(total_film))
+summary(glm_new_word)
+
+
+glm_new_combn <- glm.nb(count_new_combn_by_company ∼ count_central_co+count_peripheral_co+count_hybrid_co + C1 + C2 + total_box + operation_years + subsidiary + year, pivot_producers_us, offset(total_film))
+summary(glm_new_combn)
+```
+### Insights：\
+For new keywords, collaborations among a group of multiple specialists (peripheral co-production) are least likely to stimulate innovativity, which has a negative coefficient in the regression. In contrary, both collaborations between multiple large generlists and collaborations between generalists and specialists have a positive effect on creativity.\
+For new combinations of existing words, central co-production seems to have a negative effects on creativity. Once again, this confirms my theory in 1a, collaboration between large generalists will keep using existing combinations that they know will be effective in the market.\
+As for the control varibales, there are nothing too surprising. The longer the operation years, the more creative a producer has learned to be. And as year progressed, there are less and less room for creativity because most key words have been used before.
+
+
+## Question 2
+What might explain why some collaborations result in more innovative ﬁlms than others? It could be that when producers collaborate with other producers that are too similar to themselves, their experience is less diverse and it is more diﬃcult to come up with new innovations. On the other hand, when producers are too dissimilar, it can be hard to coordinate and combine very diﬀerent creative ideas. In this question, I measured the extent to which a producer collaborates with similar producers as the average Jaccard distance between a producer and the other producers it works with based on the co-occurrence of keywords the producers use.
+```{r,message=FALSE,warning=FALSE}
+# Just read in the file I created before
+avgDist <- read.csv("avgDist.csv")[,2:4]
+pivot_producers_us<-left_join(pivot_producers_us,avgDist,by=c("pcindex","year"))
+# average_jaccard_distance is used to measure the extent to which a producer collaborates with similar producers as the average Jaccard distance between a producer and the other producers it works with based on the co-occurrence of keywords the producers use.
+ggplot(pivot_producers_us, aes(average_jaccard_distance, count_new_words_by_company)) + geom_smooth(method = "loess", se = T) + labs(x = "Average Jaccard distance", y = "New keywords")
+ggsave("loess_new_keywords.pdf", width = 7, height = 7, units = "in") 
+```
+### Insights: \
+This graph gives me some interesting results:\
+1. When the jaccard distance is low, the number of new keywords are low. When producers are too dissimilar, it can be hard to coordinate and combine very different creative ideas, so creativity is actually harmed among extreme dissimilar collaborators.\
+2. On the other hand, when the collaborating producers are too similar, the jaccard distance is low as well. I believe that their experience is less diverse when they are too similar and it is more difficult for companies to come up with new innovations this way.\
+3. The peak of number of new key words generated happens at about 0.60 jaccard distance, which means the optimal level of similarity is neigher too high nor too low. Only companies that are diverse enough yet can work well together will be more mutual beneficial for each other.
+
+
+
+
+## Question 3
+Here, I analyzed whether collaborations inﬂuence a production company’s ﬁnancial returns.
+```{r}
+# Let's clean up the big data table a little bit.
+pivot_producers_us <- unique(pivot_producers_us[,c(2,4,11,12,14,17:28)])
+pivot_producers_us <- as.data.table(pivot_producers_us)
+
+# Since the budget information is so sparse, we will use the theater screens release coverage as a proxy for how much producers spend on each ﬁlm that they make. Deﬁne each producer’s yearly return as its yearly box oﬃce revenue divided by the total release coverage it invested in for that year for its films. 
+# Calculate total box and total release coverage by year for each company
+pivot_producers_us <- pivot_producers_us[, total_box := sum(total_box),by=list(year,pcindex)]
+pivot_producers_us <- pivot_producers_us[, release_coverage := sum(release_coverage),by=list(year,pcindex)]
+pivot_producers_us <- unique(pivot_producers_us[, yearly_return := total_box/release_coverage])
+
+# Before standardization, I removed yearly_return= inf or na
+pivot_producers_us <- as.data.frame(pivot_producers_us)
+pivot_producers_us <- pivot_producers_us[is.finite(pivot_producers_us$yearly_return),]
+
+# Standardize: To be able to make comparisons more equally across the years of the data, we’ll normalize each producer’s box office return compared to the returns that all producers earned that year. To do this, subtract the mean return of all producers for that year from a producer’s individual returnand divide it by the standard deviation of the returns for all producers that year.
+pivot_producers_us <- as.data.table(pivot_producers_us)
+pivot_producers_us <- pivot_producers_us[, mean_return := mean(yearly_return), by=year]
+pivot_producers_us <- pivot_producers_us[, std_return := sd(yearly_return), by=year]
+pivot_producers_us <- pivot_producers_us[, standardized_return := (yearly_return-mean_return)/std_return, by=year]
+```
+
+In the regression below, my dependent variable is the standardized return of each company in each year. And I again used used the same controls as in Question 1. Since the outcome is not a count, I estimated the regression using lm function.
+
+```{r}
+summary(lm(standardized_return ∼ count_central_co + count_peripheral_co + count_hybrid_co + C1 + C2 + total_box + operation_years + subsidiary + factor(year), pivot_producers_us))
+```
+### Insights: \
+Based on the results, apparently, collaborations can be ﬁnancially. count_central_co, count_peripheral_co and count_hybrid_co all have negative coefficient with standardized returns, indicating that the more collaboration a production company makes a year, the less financial returns for that company. \
+In reality, we have seen some collaboration among film companies ended in the bad way, and resulting in huge loss for both sides of producers. Thinking about the reasons, I think collaborations are financially risky because that high level of coordination is required to integrate multiple producers’ experiences into a making new ﬁlm. Film producers need to choose their collaborators carefully and thoughtfully to avoid unsuccessful collaboration, otherwise, harmful collaborations will decrease the financial returns of producers.\
+
+
+## Question 4a
+Do producers gain anything from these collaborations creatively or ﬁnancially in the long term?  First, I estimated a regression predicting the count of new keywords introduced in a producer’s solo produced ﬁlms in a year. I used the cumulative number of new keywords a producer has introduced in all of its ﬁlms through the current year that were made in “hybrid” collaborations. 
+```{r,message=FALSE,warning=FALSE}
+pivot_producers_us2 <- read.csv('pivot_producers_us.csv')
+# Subsetting only the solo-produced films
+pivot_producers_us_single <- pivot_producers_us2[pivot_producers_us2$single_co=='solo-produced',]
+pivot_producers_us_single <- as.data.frame(pivot_producers_us_single)
+
+# Count the keywords of solo-produced films produced by each company each year
+pivot_producers_us_single <- data.table(left_join(all_new_word, pivot_producers_us_single[,c('pindex','pcindex')],by='pindex'))
+pivot_producers_us_single <- pivot_producers_us_single[, .(count_new_words_solo = uniqueN(keyword)), by = c("year", "pcindex")]
+
+# Subsetting only the hybrid-produced films
+pivot_producers_us_hybrid <- pivot_producers_us2[pivot_producers_us2$type_measure_one=='Hybrid co-production',]
+pivot_producers_us_hybrid <- as.data.frame(pivot_producers_us_hybrid)
+pivot_producers_us_hybrid <- data.table(left_join(all_new_word, pivot_producers_us_hybrid[,c('pindex','pcindex')],by='pindex'))
+
+# Perform a cumulative count of new words for hybrid-produced firms
+pivot_producers_us_hybrid <- pivot_producers_us_hybrid[, .(count_new_words_hybrid = uniqueN(keyword)), by = c("year", "pcindex")]
+pivot_producers_us_hybrid <- pivot_producers_us_hybrid[order(year), Cum.Sum := cumsum(count_new_words_hybrid), by=list(pcindex)]
+
+# Merge the information into our regression table
+pivot_producers_us <- left_join(pivot_producers_us, pivot_producers_us_single, by=c('year','pcindex'))
+pivot_producers_us <- left_join(pivot_producers_us, pivot_producers_us_hybrid, by=c('year','pcindex'))
+
+# Let's take a look at the independent variable and the predictor.
+print(pivot_producers_us[c(639,640),c(22,24)])
+```
+
+
+```{r}
+# Estimate a regression predicting the count of new keywords introduced in a producer’s solo produced ﬁlms in a year. Use as a predictor the cumulative number of new keywords a producer has introduced in all of its ﬁlms through the current year that were made in “hybrid” collaborations.
+glm_4a <- glm.nb(count_new_words_solo ∼ Cum.Sum + count_central_co+count_peripheral_co+count_hybrid_co + C1 + C2 + total_box + operation_years + subsidiary + factor(year) , pivot_producers_us, offset(total_film))
+summary(glm_4a)
+```
+### Insights:\
+The predictor (the cumulative number of new keywords a producer has introduced in all of its ﬁlms through the current year that were made in “hybrid” collaborations) has a positive coefficient with the count of new keywords introduced in a producer’s solo produced ﬁlms in a year. And the result is statistically significant.\
+This result indicates that producers benefited from previous collaborations creatively in the long term. As a company had more and more collaborations and acumulated experience, it becomes much more easier for it to be creative when producing new films on its own.\
+Again, we found that even though collaborations can be financilly risky, it is beneficial for innovativity in the long run.
+
+
+
+## Question 4b
+Accounting for a producer’s engaging in collaborations, does introducing new keywords result in higher box oﬃce returns? To gain insight into this, I estimated the same regression model from Question 2, but add in a predictor for the number of new keywords introduced. 
+```{r}
+summary(lm(standardized_return ∼ count_new_words_by_company + count_central_co + count_peripheral_co + count_hybrid_co + C1 + C2 + total_box + operation_years + subsidiary + year, pivot_producers_us))
+```
+### Insights:\
+In the regression result, we can see that the count of new key words made by producers in a year have a positive coefficient with financial return, indicating that generally speaking, the more creative the film is, the more money it can make.\
+And from 4a, we learned that collaborations are beneficial for innovativity in the long-term. Thus, production companies have the incentives to collaborate with other companies and accumulate experience, so that they can become more creative and earn more profits in the long run.\
+This result helps us understand why producers engage in collaborations even though they are financilly risky. The link is: collaboration ----> more experience of being innovative -----> make more creative films -----> make profits in the long run.
+
+
+## Extra Credit
+```{r}
+members <-read.csv("film_cast_members.csv")
+# Join it to the keyword table
+members_join <- as.data.table(left_join(all_new_word,members,by='pindex'))
+
+# Perform a cumulative count of new words for hybrid-produced firms
+members_join <- members_join[, .(count_new_words_by_member = uniqueN(keyword)), by = "nconst"]
+members <- left_join(members_join, members, by='nconst')
+pivot_producers_us2 <- left_join(members,pivot_producers_us2, by='pindex')
+summary(lm(count_new_words_by_member.x ∼ count_new_words_by_company + count_central_co + count_peripheral_co + count_hybrid_co + + total_box + operation_years + subsidiary, pivot_producers_us2))
+
+```
+### Conclusion:
+Engaging in more hybrid collaborations seems to not to be helpful with hiring more innovative creative talent.But engaging in more central collaborations are helpful.
+
